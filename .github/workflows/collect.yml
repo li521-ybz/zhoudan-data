@@ -49,6 +49,9 @@ jobs:
           ROUNDS: ${{ steps.plan.outputs.rounds }}
           GAP_SEC: 1800                 # 轮间隔 30 分钟，与本地采集同频
         run: |
+          # 提交身份必须在这里配：runner 每次都是干净环境，漏了会让 git commit 直接 exit 128
+          git config user.name  "zhoudan-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           for i in $(seq 1 "$ROUNDS"); do
             echo "===== 第 $i / $ROUNDS 轮 ====="
             START=$(date +%s)
