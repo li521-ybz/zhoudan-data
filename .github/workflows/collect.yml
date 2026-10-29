@@ -1,10 +1,18 @@
 name: 洲弹 · 云端采集
 
 # 电脑关机也照常采集：GitHub 的定时器在云端跑，与本机无关。
-# 注意 cron 用 UTC，*/30 表示每半小时一次；实际触发可能延迟几分钟，属 GitHub 自身的调度抖动。
+#
+# ★ 为什么不再是 "*/30 * * * *"（2026-10-29 修复）
+#   GitHub 官方只保证 schedule「尽量」触发，高峰期会延迟、甚至直接丢轮次。
+#   实测 "*/30" 全天只跑成 10 轮（间隔 55~71 分钟），只有设计密度的一半，
+#   于是「云端最新数据」常年滞后 40~70 分钟，贴着 70 分钟的异常线。
+#   → 改成「每小时触发一次，job 内部自己循环 2 轮」：
+#     采样节奏由 job 自己 sleep 保证，不再赌 GitHub 的半小时定时器；
+#     万一某次触发被丢，下一轮按缺口自动补到 3 轮（自愈）。
+#   触发点选 :17 而不是整点——整点是 GitHub 的调度高峰，最容易延迟。
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:        # 支持手动点一下立即采一轮
 
 permissions:
@@ -17,31 +25,67 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 115    # 上限 3 轮（3 × 30 分钟 + 采集耗时）
 
     steps:
       - name: 检出数据仓库
         uses: actions/checkout@v4
 
-      - name: 采集一轮（纯标准库，无依赖安装）
-        run: python3 -u collect.py
-
-      - name: 提交数据
-        if: always()        # 采集部分失败时也提交已拿到的历史价，不白跑
+      - name: 决定本轮跑几轮（按数据缺口自愈）
+        id: plan
         run: |
-          git config user.name  "zhoudan-bot"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data hist
-          if git diff --cached --quiet; then
-            echo "本轮无新增数据，跳过提交"
-            exit 0
+          LAST=$(git log -1 --format=%ct 2>/dev/null || echo 0)
+          NOW=$(date +%s)
+          GAP=$(( (NOW - LAST) / 60 ))
+          if   [ "$GAP" -ge 100 ]; then ROUNDS=3   # 丢过一整轮 → 补采
+          elif [ "$GAP" -ge 45 ];  then ROUNDS=2
+          else                          ROUNDS=2   # 常规：覆盖本小时两个 30 分钟点
           fi
-          git commit -m "data: $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M') 采集"
-          for i in 1 2 3; do
-            if git push; then
-              echo "已推送"
-              break
+          echo "距上次采集 ${GAP} 分钟 → 本轮跑 ${ROUNDS} 轮"
+          echo "rounds=$ROUNDS" >> "$GITHUB_OUTPUT"
+
+      - name: 循环采集，每轮独立提交
+        env:
+          ROUNDS: ${{ steps.plan.outputs.rounds }}
+          GAP_SEC: 1800                 # 轮间隔 30 分钟，与本地采集同频
+        run: |
+          for i in $(seq 1 "$ROUNDS"); do
+            echo "===== 第 $i / $ROUNDS 轮 ====="
+            START=$(date +%s)
+
+            # 采集失败只告警：站点临时抽风不该中断后面几轮
+            python3 -u collect.py || echo "::warning::第 $i 轮采集返回非零，继续下一轮"
+
+            git add data hist
+            if git diff --cached --quiet; then
+              echo "第 $i 轮无新增数据，跳过提交"
+            else
+              git commit -m "data: $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M') 采集"
+              for k in 1 2 3; do
+                git push && break
+                echo "推送失败，rebase 后重试（第 $k 次）"
+                git pull --rebase --autostash
+              done
             fi
-            echo "推送失败，rebase 后重试（第 $i 次）"
-            git pull --rebase --autostash
+
+            [ "$i" -lt "$ROUNDS" ] || break
+            # 对齐到「上一轮开始 + 30 分钟」，否则采集耗时会把间隔越推越晚
+            WAIT=$(( START + GAP_SEC - $(date +%s) ))
+            if [ "$WAIT" -gt 0 ]; then
+              echo "等待 ${WAIT}s 进入下一轮"
+              sleep "$WAIT"
+            fi
           done
+
+      - name: 本轮健康自检
+        if: always()
+        run: |
+          DAY=$(TZ=Asia/Shanghai date +'%Y-%m-%d')
+          F="data/${DAY}.jsonl"
+          if [ -f "$F" ]; then
+            N=$(grep -c . "$F" || echo 0)
+            LAST=$(tail -n 1 "$F" | python3 -c "import sys,json,time;print(time.strftime('%H:%M',time.localtime(json.loads(sys.stdin.read())['t'])))" 2>/dev/null || echo "?")
+            echo "今天已采 ${N} 个采样点，最后一个 ${LAST}"
+          else
+            echo "::warning::今天还没有数据文件 ${F}"
+          fi
