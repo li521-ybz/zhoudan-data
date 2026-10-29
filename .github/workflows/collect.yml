@@ -29,6 +29,11 @@ on:
     - cron: "17 * * * *"
     - cron: "47 * * * *"
   workflow_dispatch:        # 支持手动点一下立即采一轮
+    inputs:
+      gap_sec:
+        description: "轮间隔秒数（调试用：填 20 可在几分钟内跑完 10 轮做冒烟；留空=1800）"
+        required: false
+        default: "1800"
 
 permissions:
   contents: write           # 需要写权限才能把数据提交回仓库
@@ -75,7 +80,7 @@ jobs:
       - name: 循环采集，每轮独立提交
         env:
           ROUNDS: ${{ steps.plan.outputs.rounds }}
-          GAP_SEC: 1800                 # 轮间隔 30 分钟，与本地采集同频
+          GAP_SEC: ${{ github.event.inputs.gap_sec || 1800 }}   # 轮间隔 30 分钟，与本地采集同频；手动触发可覆盖
         run: |
           # 提交身份必须在这里配：runner 每次都是干净环境，漏了会让 git commit 直接 exit 128
           git config user.name  "zhoudan-bot"
