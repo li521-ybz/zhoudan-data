@@ -1,0 +1,47 @@
+name: 洲弹 · 云端采集
+
+# 电脑关机也照常采集：GitHub 的定时器在云端跑，与本机无关。
+# 注意 cron 用 UTC，*/30 表示每半小时一次；实际触发可能延迟几分钟，属 GitHub 自身的调度抖动。
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:        # 支持手动点一下立即采一轮
+
+permissions:
+  contents: write           # 需要写权限才能把数据提交回仓库
+
+concurrency:
+  group: zhoudan-collect
+  cancel-in-progress: false # 排队而不是取消，避免丢轮次
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: 检出数据仓库
+        uses: actions/checkout@v4
+
+      - name: 采集一轮（纯标准库，无依赖安装）
+        run: python3 -u collect.py
+
+      - name: 提交数据
+        if: always()        # 采集部分失败时也提交已拿到的历史价，不白跑
+        run: |
+          git config user.name  "zhoudan-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data hist
+          if git diff --cached --quiet; then
+            echo "本轮无新增数据，跳过提交"
+            exit 0
+          fi
+          git commit -m "data: $(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M') 采集"
+          for i in 1 2 3; do
+            if git push; then
+              echo "已推送"
+              break
+            fi
+            echo "推送失败，rebase 后重试（第 $i 次）"
+            git pull --rebase --autostash
+          done
