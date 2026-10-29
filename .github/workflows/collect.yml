@@ -112,6 +112,17 @@ jobs:
             fi
           done
 
+          # 落盘校验：上面每轮只重试 3 次 push，全挂的话脚本会「看起来正常」地跑完，
+          # 但数据留在 runner 里、job 结束即丢弃 —— 必须显式兜住。
+          BR="${GITHUB_REF_NAME:-main}"
+          git fetch origin "$BR" 2>/dev/null || true
+          UNPUSHED=$(git rev-list --count "origin/$BR..HEAD" 2>/dev/null || echo "?")
+          if [ "$UNPUSHED" = "?" ] || [ "$UNPUSHED" -gt 0 ]; then
+            echo "::error::本轮有 ${UNPUSHED} 个提交没推送到 ${BR}，数据会随 runner 结束丢失"
+            exit 1
+          fi
+          echo "落盘校验通过：全部提交已进入 origin/${BR}"
+
       - name: 本轮健康自检
         if: always()
         run: |
