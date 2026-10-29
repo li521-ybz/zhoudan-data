@@ -238,13 +238,14 @@ def main() -> int:
         write_hist(hist_path, ts, hist)
 
     elapsed = round(time.time() - started, 2)
-    print(f"[{'ok' if wrote else 'fail'}] {day} 现价 {len(delta)} 条 / 历史价 {len(hist)} 条 "
-          f"/ 用时 {elapsed}s")
+    # 三态：本轮落盘 / 采样间隔太近主动跳过 / 抓不到现价（站点改版或封禁）
+    state = "ok" if wrote else ("skip" if delta else "fail")
+    print(f"[{state}] {day} 现价 {len(delta)} 条 / 历史价 {len(hist)} 条 / 用时 {elapsed}s")
     for e in errs:
         print("  !", e)
 
-    # 现价一条都没抓到 = 站点改版或封禁，让 Actions 变红好及时知道
-    return 0 if wrote else 1
+    # 只要现价抓到了就算这条链路健康；「跳过」是主动行为，不该让 Actions 变红
+    return 0 if delta else 1
 
 
 if __name__ == "__main__":
