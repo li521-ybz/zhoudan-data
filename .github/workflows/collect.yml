@@ -6,13 +6,21 @@ name: 洲弹 · 云端采集
 #   GitHub 官方只保证 schedule「尽量」触发，高峰期会延迟、甚至直接丢轮次。
 #   实测 "*/30" 全天只跑成 10 轮（间隔 55~71 分钟），只有设计密度的一半，
 #   于是「云端最新数据」常年滞后 40~70 分钟，贴着 70 分钟的异常线。
-#   → 改成「每小时触发一次，job 内部自己循环 2 轮」：
+#   → 改成「触发后 job 内部自己循环 2 轮」：
 #     采样节奏由 job 自己 sleep 保证，不再赌 GitHub 的半小时定时器；
 #     万一某次触发被丢，下一轮按缺口自动补到 3 轮（自愈）。
+#
+# ★ 为什么每小时触发两次（:17 + :47）
+#   丢掉的轮次**没有任何 run 记录**，Actions 面板全绿，只能靠冗余触发兜底：
+#   两个触发点相隔 30 分钟，同时被丢的概率远低于单个。
+#   :47 那次正常情况会命中「距上次采样 < 12 分钟 → 0 轮」直接空转退出，
+#   只有当 :17 那次确实没跑成时，它才真正接上（gap 会涨到 90 分钟 → 补 3 轮）。
+#
 #   触发点选 :17 而不是整点——整点是 GitHub 的调度高峰，最容易延迟。
 on:
   schedule:
     - cron: "17 * * * *"
+    - cron: "47 * * * *"
   workflow_dispatch:        # 支持手动点一下立即采一轮
 
 permissions:
@@ -34,14 +42,28 @@ jobs:
       - name: 决定本轮跑几轮（按数据缺口自愈）
         id: plan
         run: |
-          LAST=$(git log -1 --format=%ct 2>/dev/null || echo 0)
+          # 缺口按「当天数据文件最后一条采样」算，比 git log 准：
+          # git log 拿到的是最后一次提交时间，可能只是改 workflow，不是真采到了数据。
+          DAY=$(TZ=Asia/Shanghai date +'%Y-%m-%d')
+          F="data/${DAY}.jsonl"
+          LAST=0
+          if [ -f "$F" ]; then
+            LAST=$(tail -n 1 "$F" \
+              | python3 -c "import sys,json;print(json.loads(sys.stdin.read())['t'])" 2>/dev/null \
+              || echo 0)
+          fi
+          case "$LAST" in ''|*[!0-9]*) LAST=0 ;; esac   # 解析失败/非数字 → 退回 git log
+          if [ "$LAST" -eq 0 ] 2>/dev/null; then
+            LAST=$(git log -1 --format=%ct 2>/dev/null || echo 0)
+          fi
+          case "$LAST" in ''|*[!0-9]*) LAST=0 ;; esac   # 再校验一次，保证后面能做整数比较
           NOW=$(date +%s)
           GAP=$(( (NOW - LAST) / 60 ))
-          if   [ "$GAP" -ge 100 ]; then ROUNDS=3   # 丢过一整轮 → 补采
-          elif [ "$GAP" -ge 45 ];  then ROUNDS=2
+          if   [ "$GAP" -lt 12 ];  then ROUNDS=0   # 刚采过（:47 冗余触发）→ 空转退出
+          elif [ "$GAP" -ge 100 ]; then ROUNDS=3   # 丢过整轮 → 补采
           else                          ROUNDS=2   # 常规：覆盖本小时两个 30 分钟点
           fi
-          echo "距上次采集 ${GAP} 分钟 → 本轮跑 ${ROUNDS} 轮"
+          echo "距上次采样 ${GAP} 分钟 → 本轮跑 ${ROUNDS} 轮"
           echo "rounds=$ROUNDS" >> "$GITHUB_OUTPUT"
 
       - name: 循环采集，每轮独立提交
@@ -52,6 +74,10 @@ jobs:
           # 提交身份必须在这里配：runner 每次都是干净环境，漏了会让 git commit 直接 exit 128
           git config user.name  "zhoudan-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "$ROUNDS" -eq 0 ]; then
+            echo "本轮无需采集（距上次采样太近），直接退出"
+            exit 0
+          fi
           for i in $(seq 1 "$ROUNDS"); do
             echo "===== 第 $i / $ROUNDS 轮 ====="
             START=$(date +%s)
