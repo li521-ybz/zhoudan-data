@@ -25,9 +25,7 @@ name: 洲弹 · 云端采集
 #
 #   触发点选 :17 而不是整点——整点是 GitHub 的调度高峰，最容易延迟。
 on:
-  schedule:
-    - cron: "17 * * * *"
-    - cron: "47 * * * *"
+  # 2026-11-07 洲弹 APP 已删除：自动采集停用，本仓库仅作历史价格数据存档。
   workflow_dispatch:        # 支持手动点一下立即采一轮
     inputs:
       gap_sec:
